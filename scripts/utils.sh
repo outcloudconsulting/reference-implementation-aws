@@ -16,11 +16,56 @@ get_tags_from_config() {
     yq eval '.tags | to_entries | map("Key=" + .key + ",Value=" + .value) | join(" ")' "$CONFIG_FILE"
 }
 
-# Generate kubeconfig for the EKS cluster
+# Generate kubeconfig for the EKS cluster or k0s
 get_kubeconfig() {
   export KUBECONFIG_FILE=$(mktemp)
-  echo -e "${PURPLE}🔑 Generating temporary kubeconfig for cluster ${BOLD}${CLUSTER_NAME}${NC}...${NC}"
-  aws eks update-kubeconfig --region $AWS_REGION --name $CLUSTER_NAME --kubeconfig $KUBECONFIG_FILE > /dev/null 2>&1
+
+  if [ "${K8S_DISTRO}" = "k0s" ]; then
+    echo -e "${PURPLE}🔑 Retrieving k0s admin kubeconfig...${NC}"
+
+    # Normalize values for comparison
+    CTRL_HOST="${K0S_CONTROL_PLANE_HOST}"
+    CTRL_HOST_LOWER=$(echo "${CTRL_HOST}" | tr '[:upper:]' '[:lower:]')
+    HOSTNAME_LOWER=$(hostname -s | tr '[:upper:]' '[:lower:]')
+
+    # Decide local vs ssh: if use_local=true, empty, localhost, or matches this hostname -> read locally
+    if [ "${K0S_USE_LOCAL}" = "true" ] || [ -z "$CTRL_HOST" ] || [ "$CTRL_HOST" = "null" ] || [ "$CTRL_HOST_LOWER" = "localhost" ] || [ "$CTRL_HOST_LOWER" = "127.0.0.1" ] || [ "$CTRL_HOST_LOWER" = "$HOSTNAME_LOWER" ]; then
+      echo -e "${PURPLE}📍 Reading admin.conf locally from /var/lib/k0s/pki/admin.conf${NC}"
+      if [ ! -f /var/lib/k0s/pki/admin.conf ]; then
+        echo -e "${RED}❌ /var/lib/k0s/pki/admin.conf not found on this host${NC}"
+        exit 2
+      fi
+      sudo cat /var/lib/k0s/pki/admin.conf > "$KUBECONFIG_FILE"
+    else
+      echo -e "${PURPLE}🔐 Fetching admin.conf from ${BOLD}${K0S_CONTROL_PLANE_HOST}${NC}"
+      SSH_USER=${K0S_SSH_USER:-root}
+      if [ -n "$K0S_SSH_KEY_PATH" ] && [ "$K0S_SSH_KEY_PATH" != "null" ]; then
+        ssh -i "$K0S_SSH_KEY_PATH" -o StrictHostKeyChecking=no "$SSH_USER@$K0S_CONTROL_PLANE_HOST" "sudo cat /var/lib/k0s/pki/admin.conf" > "$KUBECONFIG_FILE"
+      else
+        ssh -o StrictHostKeyChecking=no "$SSH_USER@$K0S_CONTROL_PLANE_HOST" "sudo cat /var/lib/k0s/pki/admin.conf" > "$KUBECONFIG_FILE"
+      fi
+    fi
+
+    if [ ! -s "$KUBECONFIG_FILE" ]; then
+      echo -e "${RED}❌ Failed to retrieve kubeconfig from k0s${NC}"
+      exit 3
+    fi
+
+    # Optional: replace server address if admin.conf uses localhost
+    if [ -n "$K0S_API_ENDPOINT" ] && [ "$K0S_API_ENDPOINT" != "null" ]; then
+      sed -i "s|server: .*|server: ${K0S_API_ENDPOINT}|g" "$KUBECONFIG_FILE" || true
+    fi
+
+    echo -e "${GREEN}✅ k0s kubeconfig saved to ${KUBECONFIG_FILE}${NC}"
+  else
+    # AWS EKS path
+    if ! command -v aws >/dev/null 2>&1; then
+      echo -e "${RED}❌ aws CLI not found. Cannot fetch EKS kubeconfig.${NC}"
+      exit 1
+    fi
+    echo -e "${PURPLE}🔑 Generating temporary kubeconfig for EKS cluster ${BOLD}${CLUSTER_NAME}${NC}...${NC}"
+    aws eks update-kubeconfig --region $AWS_REGION --name $CLUSTER_NAME --kubeconfig $KUBECONFIG_FILE > /dev/null 2>&1
+  fi
 }
 
 # Wait for all Argo CD applications to report healthy status
@@ -50,8 +95,8 @@ wait_for_apps(){
   echo -e "${BOLD}${GREEN}✅ All Argo CD apps are now healthy!${NC}"
 }
 
-# Check if required binaries binaries exists
-clis=("aws" "kubectl"  "yq")
+# Check if required binaries exist
+clis=("kubectl" "yq")
 for cli in "${clis[@]}"; do
   if command -v "$cli" >/dev/null 2>&1 ; then
     continue
@@ -76,7 +121,22 @@ export DOMAIN_NAME=$(yq '.domain' "$CONFIG_FILE")
 export PATH_ROUTING=$(yq '.path_routing' "$CONFIG_FILE")
 export AUTO_MODE=$(yq '.auto_mode' "$CONFIG_FILE")
 export APPSET_ADDON_NAME=$([[ "${PATH_ROUTING}" == "true" ]] && echo "addons-appset-pr" || echo "addons-appset")
-export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
+# Get AWS Account ID only if aws CLI is available (for EKS)
+if command -v aws >/dev/null 2>&1; then
+  export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null || echo "N/A")
+else
+  export AWS_ACCOUNT_ID="N/A"
+fi
+
+# k0s options (add to config.yaml if using k0s)
+export K8S_DISTRO=$(yq -r '.k8s_distro // "eks"' "$CONFIG_FILE")
+export K0S_CONTROL_PLANE_HOST=$(yq -r '.k0s.control_plane_host // ""' "$CONFIG_FILE")
+export K0S_SSH_USER=$(yq -r '.k0s.ssh_user // "root"' "$CONFIG_FILE")
+export K0S_SSH_KEY_PATH=$(yq -r '.k0s.ssh_key_path // ""' "$CONFIG_FILE")
+export K0S_API_ENDPOINT=$(yq -r '.k0s.api_endpoint // ""' "$CONFIG_FILE")
+export K0S_USE_LOCAL=$(yq -r '.k0s.use_local // "false"' "$CONFIG_FILE")
+
 
 # Header
 echo -e "${BOLD}${ORANGE}✨ ========================================== ✨${NC}"
