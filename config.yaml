@@ -30,9 +30,10 @@ path_routing: "true"
 # Adaptions for k0s clusters
 k8s_distro: "k0s"
 k0s:
-  control_plane_host: "backstage.prism.out.cloud"
-secrets.use_aws: false
-secrets.use_k8s: true
+  use_local: true
+secrets:
+  use_aws: false
+  use_k8s: true
 
 # Tags for AWS resources
 tags:

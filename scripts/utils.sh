@@ -242,7 +242,7 @@ fi
 
 if [ $PHASE = "create-update-secrets" ]; then
   echo -e "${CYAN}🔐 Secret names:${NC} ${BOLD}${SECRET_NAME_PREFIX}/config & ${SECRET_NAME_PREFIX}/github-app ${NC}"
-  echo -e "\n${BOLD}${RED}⚠️  WARNING: This will update the secrets if already they exists!!{NC}"
+  echo -e "\n${BOLD}${RED}⚠️  WARNING: This will update the secrets if already they exists!!${NC}"
   echo -e "${BOLD}${GREEN}❓ Are you sure you want to continue?${NC}"
   read -p '(yes/no): ' response
   if [[ ! "$response" =~ ^[Yy][Ee][Ss]$ ]]; then
